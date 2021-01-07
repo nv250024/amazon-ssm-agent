@@ -15,8 +15,10 @@
 package platform
 
 import (
+	"errors"
 	"fmt"
 	"net"
+	"os/exec"
 	"sort"
 	"strings"
 	"unicode/utf8"
@@ -129,40 +131,70 @@ func getServiceEndpoint(region string, service string, endpoint string) string {
 
 // IP of the network interface
 func IP() (selected string, err error) {
-	var interfaces []net.Interface
-	if interfaces, err = net.Interfaces(); err == nil {
-		interfaces = filterInterface(interfaces)
-		sort.Sort(byIndex(interfaces))
-		candidates := make([]net.IP, 0)
-		for _, i := range interfaces {
-			var addrs []net.Addr
-			if addrs, err = i.Addrs(); err != nil {
-				continue
-			}
-			for _, addr := range addrs {
-				switch v := addr.(type) {
-				case *net.IPAddr:
-					candidates = append(candidates, v.IP.To4())
-					candidates = append(candidates, v.IP.To16())
-				case *net.IPNet:
-					candidates = append(candidates, v.IP.To4())
-					candidates = append(candidates, v.IP.To16())
+	log := ssmlog.SSMLogger(true)
+	selected, err = primaryIpInfoNew()
+	if err == nil && selected != "" {
+		log.Infof("platform.go: found a valid primary_ip using primaryIpInfoNew(): %v", selected)
+	} else {
+		var interfaces []net.Interface
+		if interfaces, err = net.Interfaces(); err == nil {
+			interfaces = filterInterface(interfaces)
+			sort.Sort(byIndex(interfaces))
+			candidates := make([]net.IP, 0)
+			for _, i := range interfaces {
+				if i.Name == "eth0" {
+					var addrs []net.Addr
+					if addrs, err = i.Addrs(); err != nil {
+						continue
+					}
+					for _, addr := range addrs {
+						switch v := addr.(type) {
+						case *net.IPAddr:
+							candidates = append(candidates, v.IP.To4())
+							candidates = append(candidates, v.IP.To16())
+						case *net.IPNet:
+							candidates = append(candidates, v.IP.To4())
+							candidates = append(candidates, v.IP.To16())
+						}
+					}
 				}
 			}
+			selectedIp, err := selectIp(candidates)
+			if err == nil {
+				selected = selectedIp.String()
+			}
+		} else {
+			err = fmt.Errorf("failed to load network interfaces: %v", err)
 		}
-		selectedIp, err := selectIp(candidates)
-		if err == nil {
-			selected = selectedIp.String()
+
+		if err != nil {
+			err = fmt.Errorf("failed to determine IP address: %v", err)
 		}
-	} else {
-		err = fmt.Errorf("failed to load network interfaces: %v", err)
 	}
-
-	if err != nil {
-		err = fmt.Errorf("failed to determine IP address: %v", err)
-	}
-
 	return
+}
+
+func primaryIpInfoNew() (value string, err error) {
+	app := "ip"
+	arg0 := "address"
+	out, _ := exec.Command(app, arg0).Output()
+	lines := strings.Split(string(out), "\n")
+	for index := range lines {
+		output_line := strings.TrimSpace(lines[index])
+		// Only interested in the primary IP address (eth0)
+		if strings.HasPrefix(output_line, "inet") && strings.HasSuffix(output_line, "eth0") {
+			tokens := strings.Split(output_line, " ")
+			if len(tokens) > 0 {
+				primary_ip := strings.Split(tokens[1], "/")[0]
+				if len(primary_ip) == 0 {
+					return "", errors.New("no ip address found for eth0")
+				}
+				return primary_ip, nil
+			}
+			return "", errors.New("no ips in eth0")
+		}
+	}
+	return "", errors.New("no interface eth0 found")
 }
 
 // Selects a single IP address to be reported for this instance.

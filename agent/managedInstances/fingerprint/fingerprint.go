@@ -25,6 +25,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"time"
 	"unicode/utf8"
@@ -320,19 +321,52 @@ func hostnameInfo() (value string, err error) {
 }
 
 func primaryIpInfo() (value string, err error) {
-	addrs, err := net.InterfaceAddrs()
-	if err != nil {
-		return "", err
-	}
-	for _, address := range addrs {
-		// check the address type and if it is not a loopback then return it
-		if ipnet, ok := address.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
-			if ipnet.IP.To4() != nil {
-				return ipnet.IP.String(), nil
+	logger := getLogger()
+	primaryIp, err := primaryIpInfoNew()
+	if err == nil && primaryIp != "" {
+		logger.Infof("fingerprint.go: found a valid primary_ip using primaryIpInfoNew(): %v", primaryIp)
+		return primaryIp, nil
+	} else {
+		logger.Infof("failed to determine IP address using primaryIpInfoNew")
+		addrs, err := net.InterfaceAddrs()
+		if err != nil {
+			logger.Infof("failed to determine IP address using net.InterfaceAddrs()")
+			return "", err
+		}
+		for _, address := range addrs {
+			// check the address type and if it is not a loopback then return it
+			if ipnet, ok := address.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
+				if ipnet.IP.To4() != nil {
+					logger.Infof("found a valid primary_ip using net.InterfaceAddrs(): %v", ipnet.IP.String())
+					return ipnet.IP.String(), nil
+				}
 			}
 		}
 	}
 	return "", err
+}
+
+func primaryIpInfoNew() (value string, err error) {
+	app := "ip"
+	arg0 := "address"
+	out, _ := exec.Command(app, arg0).Output()
+	lines := strings.Split(string(out), "\n")
+	for index := range lines {
+		output_line := strings.TrimSpace(lines[index])
+		// Only interested in the primary IP address (eth0)
+		if strings.HasPrefix(output_line, "inet") && strings.HasSuffix(output_line, "eth0") {
+			tokens := strings.Split(output_line, " ")
+			if len(tokens) > 0 {
+				primary_ip := strings.Split(tokens[1], "/")[0]
+				if len(primary_ip) == 0 {
+					return "", errors.New("no ip address found for eth0")
+				}
+				return primary_ip, nil
+			}
+			return "", errors.New("no ips in eth0")
+		}
+	}
+	return "", errors.New("no interface eth0 found")
 }
 
 func macAddrInfo() (value string, err error) {
